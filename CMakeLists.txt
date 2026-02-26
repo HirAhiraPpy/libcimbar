@@ -46,6 +46,48 @@ if(DEFINED BUILD_PORTABLE_LINUX)
 	set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -static-libstdc++ -static-libgcc")
 endif()
 
+if(DEFINED BUILD_CGO)
+	# CGO build: create static library for Go integration
+	set(CGO_BUILD_DIR ${libcimbar_SOURCE_DIR}/build-cgo)
+	set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -fPIC")
+
+	add_library(cimbar_decoder STATIC
+		src/lib/cimbar_js/cimbar_recv_js.cpp
+		src/lib/cimbar_js/cimbar_recv_js.h
+	)
+
+	target_include_directories(cimbar_decoder PUBLIC
+		${libcimbar_SOURCE_DIR}/src/lib
+		${libcimbar_SOURCE_DIR}/src/third_party_lib
+	)
+
+	target_link_libraries(cimbar_decoder
+		cimb_translator
+		extractor
+		image_hash
+		bit_file
+		compression
+		fountain
+		encoder
+		util
+		serialize
+		chromatic_adaptation
+
+		correct_static
+		wirehair
+		zstd
+
+		${OPENCV_LIBS}
+	)
+
+	set_target_properties(cimbar_decoder PROPERTIES
+		ARCHIVE_OUTPUT_DIRECTORY ${CGO_BUILD_DIR}/lib
+		LIBRARY_OUTPUT_DIRECTORY ${CGO_BUILD_DIR}/lib
+	)
+
+	message(STATUS "CGO build enabled. Output: ${CGO_BUILD_DIR}")
+endif()
+
 if(NOT DEFINED OPENCV_LIBS)
 	set(OPENCV_LIBS "opencv_calib3d" "opencv_imgcodecs" "opencv_imgproc" "opencv_photo" "opencv_core" ${OPENCV4_STATIC_LIBRARIES})
 endif()

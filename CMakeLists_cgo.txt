@@ -1,0 +1,50 @@
+# Build script for cimbar Go server C library
+# This script builds the necessary C libraries for CGO integration
+
+set(CGO_BUILD_DIR ${libcimbar_SOURCE_DIR}/build-cgo)
+
+# Create a static library target for CGO
+add_library(cimbar_decoder STATIC
+  src/lib/cimbar_js/cimbar_recv_js.cpp
+  src/lib/cimbar_js/cimbar_recv_js.h
+  src/lib/cimbar_js/cimbar_js.cpp
+  src/lib/cimbar_js/cimbar_js.h
+)
+
+target_include_directories(cimbar_decoder PUBLIC
+  ${libcimbar_SOURCE_DIR}/src/lib
+  ${libcimbar_SOURCE_DIR}/src/third_party_lib
+)
+
+target_link_libraries(cimbar_decoder
+  cimb_translator
+  extractor
+  image_hash
+  bit_file
+  compression
+  fountain
+  encoder
+  util
+  serialize
+  chromatic_adaptation
+
+  correct_static
+  wirehair
+  zstd
+
+  ${OPENCV_LIBS}
+)
+
+# Set output directory
+set_target_properties(cimbar_decoder PROPERTIES
+  ARCHIVE_OUTPUT_DIRECTORY ${CGO_BUILD_DIR}/lib
+  LIBRARY_OUTPUT_DIRECTORY ${CGO_BUILD_DIR}/lib
+)
+
+# Install target for CGO
+install(TARGETS cimbar_decoder
+  ARCHIVE DESTINATION ${CGO_BUILD_DIR}/lib
+  LIBRARY DESTINATION ${CGO_BUILD_DIR}/lib
+)
+
+message(STATUS "CGO build enabled. Output: ${CGO_BUILD_DIR}")
