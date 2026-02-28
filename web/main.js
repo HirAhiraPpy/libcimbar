@@ -16,6 +16,9 @@ var Main = function () {
   var _idealRatio = 1;
   var _compressBuff = undefined;
 
+  // Module reference (set after WASM loads)
+  var Module = null;
+
   function toggleFullscreen() {
     if (document.fullscreenElement) {
       return document.exitFullscreen();
@@ -67,6 +70,10 @@ var Main = function () {
   }
 
   function copyToWasmHeap(abuff) {
+    if (!Module) {
+      console.error('Module not initialized');
+      return null;
+    }
     const dataPtr = Module._malloc(abuff.length);
     const wasmData = new Uint8Array(Module.HEAPU8.buffer, dataPtr, abuff.length);
     wasmData.set(abuff);
@@ -75,7 +82,8 @@ var Main = function () {
 
   // public interface
   return {
-    init: function (canvas) {
+    init: function (canvas, wasmModule) {
+      Module = wasmModule || window.Module;
       Main.setMode('B');
       Main.check_GL_enabled(canvas);
     },
@@ -453,3 +461,24 @@ window.addEventListener("drop", function (e) {
 window.addEventListener('resize', () => {
   Main.resize();
 });
+
+// WASM 加载完成后的初始化
+window.initializeEncoder = function() {
+  var canvas = document.getElementById('canvas');
+
+  // 确保 Module 已设置
+  if (!window.Module) {
+    console.error('Module 未初始化');
+    return;
+  }
+
+  Module = window.Module;
+
+  // 设置 canvas
+  Module.canvas = canvas;
+
+  // 调用初始化
+  console.log('初始化编码器...');
+  Main.init(canvas, Module);
+  Main.nextFrame();
+};

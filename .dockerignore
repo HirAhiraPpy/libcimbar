@@ -1,0 +1,42 @@
+# Git
+.git
+.gitignore
+.gitmodules
+
+# 构建产物
+build/
+build-cgo/
+dist/
+tmp/
+*.o
+*.a
+*.so
+
+# Go
+go.sum
+vendor/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 文档
+*.md
+!README.md
+docs/
+
+# 脚本
+scripts/
+*.sh
+!docker-entrypoint.sh
+
+# 测试
+test/
+*_test.go
+
+# 其他
+.claude/
+*.log
+.DS_Store
+Thumbs.db
