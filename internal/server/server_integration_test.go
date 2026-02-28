@@ -1,12 +1,16 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,7 +41,23 @@ func startTestServer() (*Server, string, func()) {
 		panic(fmt.Sprintf("failed to create temp dir: %v", err))
 	}
 
-	srv, err := NewServer(outputDir, "B", 2)
+	cacheDir, err := os.MkdirTemp("", "cimbar-test-cache-*")
+	if err != nil {
+		os.RemoveAll(outputDir)
+		panic(fmt.Sprintf("failed to create cache dir: %v", err))
+	}
+
+	dbPath := filepath.Join(cacheDir, "test.db")
+
+	cfg := ServerConfig{
+		OutputDir: outputDir,
+		CacheDir:  cacheDir,
+		Mode:      "B",
+		Workers:   2,
+		DBPath:    dbPath,
+	}
+
+	srv, err := NewServer(cfg)
 	if err != nil {
 		os.RemoveAll(outputDir)
 		panic(fmt.Sprintf("failed to create server: %v", err))
@@ -45,6 +65,7 @@ func startTestServer() (*Server, string, func()) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", srv.WSHandler)
+	mux.HandleFunc("/api/login", srv.LoginHandler)
 
 	server := &http.Server{
 		Addr:    ":0", // 随机端口
@@ -57,8 +78,11 @@ func startTestServer() (*Server, string, func()) {
 		panic(fmt.Sprintf("failed to listen: %v", err))
 	}
 
-	// Get the actual port
+	// Get the actual port and use 127.0.0.1 for IPv4 compatibility
 	addr := listener.Addr().String()
+	// Extract port and use localhost
+	_, port, _ := net.SplitHostPort(addr)
+	addr = "127.0.0.1:" + port
 
 	// Start server in goroutine
 	go func() {
@@ -79,6 +103,39 @@ func startTestServer() (*Server, string, func()) {
 	}
 
 	return srv, addr, cleanup
+}
+
+// getTestSessionToken 辅助函数获取 session token
+func getTestSessionToken(serverURL string) string {
+	loginReq := LoginRequest{Email: "test@test.com"}
+	body, _ := json.Marshal(loginReq)
+
+	if !strings.HasPrefix(serverURL, "http://") && !strings.HasPrefix(serverURL, "https://") {
+		serverURL = "http://" + serverURL
+	}
+
+	resp, err := http.Post(serverURL+"/api/login", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, _ = io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var loginResp LoginResponse
+	if err := json.Unmarshal(body, &loginResp); err != nil {
+		return ""
+	}
+
+	if !loginResp.Success {
+		return ""
+	}
+
+	return loginResp.SessionToken
 }
 
 // verifySavedFile 验证保存的文件
@@ -116,11 +173,17 @@ func TestIntegration_SingleFileDecode(t *testing.T) {
 			_, addr, cleanup := startTestServer()
 			defer cleanup()
 
+			// Get session token
+			token := getTestSessionToken("http://" + addr)
+			if token == "" {
+				t.Fatal("failed to get session token")
+			}
+
 			// 2. 生成测试内容（未使用，保留用于未来 encoder 集成）
 			_ = generateTestContent(tc.size)
 
 			// 3. 连接 WebSocket
-			client, err := Connect("ws://" + addr + "/ws")
+			client, err := Connect("ws://"+addr+"/ws", token)
 			if err != nil {
 				t.Fatalf("failed to connect: %v", err)
 			}
@@ -154,9 +217,15 @@ func TestIntegration_ServerLifecycle(t *testing.T) {
 	_, addr, cleanup := startTestServer()
 	defer cleanup()
 
+	// Get session token
+	token := getTestSessionToken("http://" + addr)
+	if token == "" {
+		t.Fatal("failed to get session token")
+	}
+
 	// Test multiple connections
 	for i := 0; i < 3; i++ {
-		client, err := Connect("ws://" + addr + "/ws")
+		client, err := Connect("ws://"+addr+"/ws", token)
 		if err != nil {
 			t.Fatalf("connection %d: failed to connect: %v", i, err)
 		}
@@ -176,7 +245,13 @@ func TestIntegration_ResponseTypes(t *testing.T) {
 	_, addr, cleanup := startTestServer()
 	defer cleanup()
 
-	client, err := Connect("ws://" + addr + "/ws")
+	// Get session token
+	token := getTestSessionToken("http://" + addr)
+	if token == "" {
+		t.Fatal("failed to get session token")
+	}
+
+	client, err := Connect("ws://"+addr+"/ws", token)
 	if err != nil {
 		t.Fatalf("failed to connect: %v", err)
 	}
@@ -201,10 +276,16 @@ func TestIntegration_ConcurrentClients(t *testing.T) {
 	_, addr, cleanup := startTestServer()
 	defer cleanup()
 
+	// Get session token
+	token := getTestSessionToken("http://" + addr)
+	if token == "" {
+		t.Fatal("failed to get session token")
+	}
+
 	// Connect multiple clients concurrently
 	clients := make([]*WSClient, 5)
 	for i := range clients {
-		client, err := Connect("ws://" + addr + "/ws")
+		client, err := Connect("ws://"+addr+"/ws", token)
 		if err != nil {
 			t.Fatalf("client %d: failed to connect: %v", i, err)
 		}
@@ -227,7 +308,13 @@ func TestIntegration_KeepAlive(t *testing.T) {
 	_, addr, cleanup := startTestServer()
 	defer cleanup()
 
-	client, err := Connect("ws://" + addr + "/ws")
+	// Get session token
+	token := getTestSessionToken("http://" + addr)
+	if token == "" {
+		t.Fatal("failed to get session token")
+	}
+
+	client, err := Connect("ws://"+addr+"/ws", token)
 	if err != nil {
 		t.Fatalf("failed to connect: %v", err)
 	}
@@ -248,7 +335,13 @@ func BenchmarkServerThroughput(b *testing.B) {
 	_, addr, cleanup := startTestServer()
 	defer cleanup()
 
-	client, err := Connect("ws://" + addr + "/ws")
+	// Get session token
+	token := getTestSessionToken("http://" + addr)
+	if token == "" {
+		b.Fatal("failed to get session token")
+	}
+
+	client, err := Connect("ws://"+addr+"/ws", token)
 	if err != nil {
 		b.Fatalf("failed to connect: %v", err)
 	}

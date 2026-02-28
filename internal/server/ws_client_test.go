@@ -17,14 +17,20 @@ type WSClient struct {
 	timeout time.Duration
 }
 
-// Connect 连接到服务器
-func Connect(url string) (*WSClient, error) {
-	dialer := websocket.Dialer{
-		ReadBufferSize:  1024 * 1024,
-		WriteBufferSize: 1024 * 1024,
-		HandshakeTimeout: time.Second * 10,
+// Connect 连接到服务器（带 session token）
+func Connect(url string, token string) (*WSClient, error) {
+	// Add token to URL
+	connectURL := url
+	if token != "" {
+		connectURL = url + "?token=" + token
 	}
-	conn, _, err := dialer.Dial(url, nil)
+
+	dialer := websocket.Dialer{
+		ReadBufferSize:     1024 * 1024,
+		WriteBufferSize:    1024 * 1024,
+		HandshakeTimeout:   time.Second * 10,
+	}
+	conn, _, err := dialer.Dial(connectURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}

@@ -13,3 +13,4 @@ CTestTestfile.cmake
 Makefile
 callgrind.out*
 cmake_install.cmake
+tmp/

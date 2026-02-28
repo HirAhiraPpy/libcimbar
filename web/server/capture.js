@@ -30,6 +30,35 @@
     let isScanActive = false; // Whether scanning is enabled by user
     let currentResolution = { width: 1280, height: 720 };
     let pingIntervalId = null; // Heartbeat ping interval
+    let isWebSocketReady = false; // Whether WebSocket connection is established
+
+    // Get session token from login module
+    function getSessionToken() {
+        if (window.getSessionToken) {
+            return window.getSessionToken();
+        }
+        return getCookieToken();
+    }
+
+    // Get token from cookie
+    function getCookieToken() {
+        const cookies = document.cookie.split(';');
+        for (let cookie of cookies) {
+            const [name, value] = cookie.trim().split('=');
+            if (name === 'session_token' && value) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    // Check if user is logged in
+    function isLoggedIn() {
+        if (window.getIsLoggedIn) {
+            return window.getIsLoggedIn();
+        }
+        return getSessionToken() !== null;
+    }
 
     // DOM elements
     const scanFrame = document.getElementById("scan-frame");
@@ -54,6 +83,7 @@
     const filesToggle = document.getElementById("files-toggle");
     const sidebarClose = document.getElementById("sidebar-close");
     const completedFilesList = document.getElementById("completed-files-list");
+    const sidebarOverlay = document.getElementById("sidebar-overlay");
 
     // Settings elements (in sidebar)
     const modeSelect = document.getElementById("mode-select");
@@ -104,11 +134,38 @@
 
         setupEventListeners();
         setupCamera();
-        setupWebSocket();
+
+        // Don't connect WebSocket until logged in
+        // setupWebSocket(); will be called by login.js on successful login
 
         // Load completed files from server
         loadCompletedFiles();
     }
+
+    // Connect WebSocket (called after login)
+    function connectWebSocket() {
+        if (!isWebSocketReady && !ws) {
+            setupWebSocket();
+        }
+    }
+
+    // Disconnect WebSocket (called on logout)
+    function disconnectWebSocket() {
+        isWebSocketReady = false;
+        if (ws) {
+            ws.close();
+            ws = null;
+        }
+        isConnected = false;
+        updateConnectionStatus("已登出");
+        stopCapture();
+        statusText.textContent = "已登出";
+    }
+
+    // Export functions for login.js
+    window.initCapture = init;
+    window.onLoginSuccess = connectWebSocket;
+    window.onLogout = disconnectWebSocket;
 
     // Setup camera with selected resolution
     async function setupCamera() {
@@ -232,16 +289,28 @@
 
     // Setup WebSocket
     function setupWebSocket() {
-        console.log("Connecting to WebSocket:", WS_URL);
+        // Don't connect if not logged in
+        if (!isLoggedIn()) {
+            console.log("WebSocket: Not logged in, waiting for login...");
+            updateConnectionStatus("等待登录");
+            return;
+        }
+
+        const token = getSessionToken();
+        const wsUrlWithToken = token ? `${WS_URL}?token=${encodeURIComponent(token)}` : WS_URL;
+
+        console.log("Connecting to WebSocket:", wsUrlWithToken);
         statusText.textContent = "正在连接服务器...";
+        updateConnectionStatus("连接中...");
 
         try {
-            ws = new WebSocket(WS_URL);
+            ws = new WebSocket(wsUrlWithToken);
             ws.binaryType = "arraybuffer";
 
             ws.onopen = () => {
                 console.log("WebSocket connected!");
                 isConnected = true;
+                isWebSocketReady = true;
                 updateConnectionStatus("已连接");
                 if (isScanActive) {
                     statusText.textContent = '就绪，点击"开始识别"';
@@ -255,16 +324,21 @@
             ws.onclose = (event) => {
                 console.log("WebSocket closed:", event.code, event.reason);
                 isConnected = false;
+                isWebSocketReady = false;
                 updateConnectionStatus("已断开");
                 if (
                     statusText.textContent.indexOf("摄像头") === -1 &&
-                    statusText.textContent.indexOf("就绪") === -1
+                    statusText.textContent.indexOf("就绪") === -1 &&
+                    isLoggedIn()
                 ) {
                     statusText.textContent = "已断开，重连中...";
                 }
                 // Stop ping
                 stopPing();
-                setTimeout(setupWebSocket, RECONNECT_DELAY);
+                // Only reconnect if still logged in
+                if (isLoggedIn()) {
+                    setTimeout(setupWebSocket, RECONNECT_DELAY);
+                }
             };
 
             ws.onerror = (err) => {
@@ -391,8 +465,22 @@
                     }
 
                     // Show bytes received progress
-                    const bytesRecv =
-                        response.bytes_decoded || response.bytes_recv || 0;
+                    // Use progress array to calculate cumulative bytes received
+                    // progress values are decimals (0.0-1.0), multiply by file_size to get bytes
+                    let bytesRecv = 0;
+                    if (response.progress && response.progress.length > 0) {
+                        // Sum up progress from all streams and multiply by file size
+                        const totalProgress = response.progress.reduce((sum, p) => {
+                            // Normalize progress to 0-1 range if needed
+                            const normalizedP = p > 1 ? p / 100 : p;
+                            return sum + normalizedP;
+                        }, 0);
+                        // For single file, totalProgress is the fraction complete
+                        bytesRecv = Math.round(totalProgress * response.file_size);
+                    } else {
+                        bytesRecv = response.bytes_decoded || response.bytes_recv || 0;
+                    }
+
                     if (response.file_size > 0) {
                         const percent = Math.round(
                             (bytesRecv * 100) / response.file_size,
@@ -417,8 +505,8 @@
                         );
                     }
                 } else {
-                    updateStatusText("解码中...");
-                    fileInfo.textContent = "";
+                    // updateStatusText("解码中...");
+                    // fileInfo.textContent = "";
                 }
                 break;
 
@@ -672,7 +760,12 @@
         // Settings sidebar toggle
         if (settingsToggle) {
             settingsToggle.addEventListener("click", () => {
-                settingsSidebar.classList.toggle("open");
+                const isOpen = settingsSidebar.classList.toggle("open");
+                if (isOpen) {
+                    sidebarOverlay.classList.add("visible");
+                } else {
+                    sidebarOverlay.classList.remove("visible");
+                }
             });
         }
 
@@ -680,23 +773,16 @@
         if (settingsClose) {
             settingsClose.addEventListener("click", () => {
                 settingsSidebar.classList.remove("open");
+                sidebarOverlay.classList.remove("visible");
             });
         }
 
-        // Files sidebar toggle
-        if (filesToggle) {
-            filesToggle.addEventListener("click", () => {
-                sidebar.classList.toggle("open");
-                if (sidebar.classList.contains("open")) {
-                    updateCompletedFilesList();
-                }
-            });
-        }
-
-        // Sidebar close
-        if (sidebarClose) {
-            sidebarClose.addEventListener("click", () => {
+        // Close sidebar when clicking overlay (for both sidebars)
+        if (sidebarOverlay) {
+            sidebarOverlay.addEventListener("click", () => {
                 sidebar.classList.remove("open");
+                settingsSidebar.classList.remove("open");
+                sidebarOverlay.classList.remove("visible");
             });
         }
 
@@ -831,10 +917,41 @@
             downloadBtn.textContent = "下载";
             downloadBtn.addEventListener("click", (e) => {
                 e.stopPropagation();
-                downloadFile(file.filename);
+                downloadFile(file.fileHash, file.original_filename);
+            });
+
+            const deleteBtn = document.createElement("button");
+            deleteBtn.textContent = "删除";
+            deleteBtn.style.background = "rgba(200, 50, 50, 0.4)";
+            deleteBtn.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                if (!confirm(`确定要删除文件"${file.filename}"吗？`)) {
+                    return;
+                }
+
+                const token = getSessionToken();
+                try {
+                    const response = await fetch(`/api/files/${file.fileHash || file.filename}`, {
+                        method: "DELETE",
+                        headers: {
+                            "Authorization": `Bearer ${token || ''}`
+                        }
+                    });
+
+                    if (response.ok) {
+                        completedFiles.splice(idx, 1);
+                        updateCompletedFilesList();
+                    } else {
+                        alert("删除失败");
+                    }
+                } catch (err) {
+                    console.error("Delete failed:", err);
+                    alert("删除失败：" + err.message);
+                }
             });
 
             actionsDiv.appendChild(downloadBtn);
+            actionsDiv.appendChild(deleteBtn);
             item.appendChild(filenameDiv);
             item.appendChild(metaDiv);
             item.appendChild(actionsDiv);
@@ -844,29 +961,41 @@
     }
 
     // Download file
-    function downloadFile(filename) {
-        const url = `/api/download?file=${encodeURIComponent(filename)}`;
+    function downloadFile(fileHash, originalFilename) {
+        const token = getSessionToken();
+        // Use fileHash for the download API, originalFilename is for reference only
+        const url = `/api/download?hash=${encodeURIComponent(fileHash)}`;
         window.open(url, "_blank");
     }
 
     // Load completed files from server on init
     async function loadCompletedFiles() {
+        const token = getSessionToken();
         try {
-            const response = await fetch("/api/files");
+            const response = await fetch("/api/files", {
+                headers: {
+                    "Authorization": `Bearer ${token || ''}`
+                }
+            });
             if (response.ok) {
-                const files = await response.json();
-                if (files && files.length > 0) {
-                    completedFiles = files.map(f => ({
-                        filename: f.filename,
+                const data = await response.json();
+                if (data && data.files && data.files.length > 0) {
+                    completedFiles = data.files.map(f => ({
+                        filename: f.original_filename,
                         fileSize: f.file_size,
-                        completedAt: f.completed_at
+                        completedAt: f.created_at,
+                        fileHash: f.file_hash
                     }));
+                    updateCompletedFilesList();
                 }
             }
         } catch (err) {
             console.error("Failed to load completed files:", err);
         }
     }
+
+    // Export loadCompletedFiles for global access
+    window.loadCompletedFiles = loadCompletedFiles;
 
     // Start when DOM is ready
     if (document.readyState === "loading") {

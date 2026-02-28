@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -18,6 +19,8 @@ func main() {
 	// Command line flags
 	addr := flag.String("addr", ":8080", "HTTP listen address")
 	outputDir := flag.String("output-dir", "/tmp/cimbar-downloads", "Directory to save decoded files")
+	cacheDir := flag.String("cache-dir", "./data/cache", "Directory to cache user files")
+	dbPath := flag.String("db-path", "./data/cimbar.db", "Path to SQLite database")
 	mode := flag.String("mode", "Auto", "Cimbar decode mode (Auto, B, Bu, Bm, 4C)")
 	workers := flag.Int("workers", 4, "Number of decoder workers")
 	webDir := flag.String("web-dir", "./web/server", "Directory containing static web files")
@@ -29,8 +32,21 @@ func main() {
 		log.Fatal("output-dir is required")
 	}
 
-	// Create server
-	srv, err := server.NewServer(*outputDir, *mode, *workers)
+	// Ensure data directory exists
+	dataDir := filepath.Dir(*dbPath)
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		log.Fatalf("Failed to create data directory: %v", err)
+	}
+
+	// Create server with config
+	cfg := server.ServerConfig{
+		OutputDir: *outputDir,
+		CacheDir:  *cacheDir,
+		Mode:      *mode,
+		Workers:   *workers,
+		DBPath:    *dbPath,
+	}
+	srv, err := server.NewServer(cfg)
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
 	}
@@ -38,10 +54,24 @@ func main() {
 	// Setup HTTP handlers
 	fs := http.Dir(*webDir)
 	mux := http.NewServeMux()
+
+	// Static files
 	mux.Handle("/", srv.StaticHandler(fs))
+
+	// WebSocket endpoint
 	mux.HandleFunc("/ws", srv.WSHandler)
-	mux.HandleFunc("/api/files", srv.FilesHandler)
-	mux.HandleFunc("/api/download", srv.DownloadHandler)
+
+	// Authentication APIs
+	mux.HandleFunc("/api/login", srv.LoginHandler)
+	mux.HandleFunc("/api/logout", srv.LogoutHandler)
+	mux.HandleFunc("/api/session/validate", srv.ValidateSessionHandler)
+	mux.HandleFunc("/api/user", srv.UserInfoHandler)
+
+	// File management APIs
+	mux.HandleFunc("/api/files", srv.FilesHandler)           // GET list, DELETE all
+	mux.HandleFunc("/api/files/", srv.FileDetailHandler)     // GET/DELETE single file
+	mux.HandleFunc("/api/download", srv.DownloadHandler)     // Download file
+	mux.HandleFunc("/api/upload", srv.StreamDownloadHandler) // Upload file (from decoder)
 
 	// Create HTTP server with timeouts
 	httpServer := &http.Server{
@@ -61,6 +91,8 @@ func main() {
 		log.Printf("Starting cimbar web server on %s", *addr)
 		log.Printf("Web UI: http://%s", *addr)
 		log.Printf("Output directory: %s", *outputDir)
+		log.Printf("Cache directory: %s", *cacheDir)
+		log.Printf("Database path: %s", *dbPath)
 		log.Printf("Press Ctrl+C to stop")
 
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

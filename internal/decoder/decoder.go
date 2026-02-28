@@ -152,14 +152,23 @@ func (d *Decoder) FountainDecode(data []byte) (*FountainResult, error) {
 	// Parse fountain metadata from data
 	// First 6 bytes: [encode_id:1][file_size:3][block_id:2]
 	var fileSize uint32 = 0
-	var bytesRecv uint32 = 0
 	if len(data) >= 6 {
 		// Parse file size from bytes 1-3 (big endian with high bit in byte 0)
 		fileSize = uint32(data[3]) | (uint32(data[2]) << 8) | (uint32(data[1]) << 16) | ((uint32(data[0]) & 0x80) << 17)
-		// Block ID from bytes 4-5
-		blockID := uint16(data[5]) | (uint16(data[4]) << 8)
-		// Approximate bytes received = block_id * chunk_size (744 bytes per block)
-		bytesRecv = uint32(blockID+1) * 744
+	}
+
+	// Get progress to calculate cumulative bytes received
+	progress := d.getProgress()
+	var bytesRecv uint32 = 0
+	if len(progress) > 0 && fileSize > 0 {
+		// Sum up progress from all streams (usually just one for single file)
+		// Progress values are decimals (0.0-1.0)
+		totalProgress := 0.0
+		for _, p := range progress {
+			totalProgress += p
+		}
+		// For single file, bytesRecv = progress * fileSize
+		bytesRecv = uint32(totalProgress * float64(fileSize))
 		if bytesRecv > fileSize {
 			bytesRecv = fileSize
 		}
@@ -173,7 +182,7 @@ func (d *Decoder) FountainDecode(data []byte) (*FountainResult, error) {
 				IsDuplicate: true,
 				FileSize:    fileSize,
 				BytesRecv:   bytesRecv,
-				Progress:    d.getProgress(),
+				Progress:    progress,
 			}, nil
 		}
 		return nil, fmt.Errorf("fountain decode error: %d", result)
@@ -186,7 +195,7 @@ func (d *Decoder) FountainDecode(data []byte) (*FountainResult, error) {
 			FileID:    fileID,
 			FileSize:  fileSize,
 			BytesRecv: bytesRecv,
-			Progress:  d.getProgress(),
+			Progress:  progress,
 		}, nil
 	}
 
@@ -194,7 +203,7 @@ func (d *Decoder) FountainDecode(data []byte) (*FountainResult, error) {
 		FileID:    0,
 		FileSize:  fileSize,
 		BytesRecv: bytesRecv,
-		Progress:  d.getProgress(),
+		Progress:  progress,
 	}, nil
 }
 
