@@ -287,6 +287,16 @@ int cimbard_configure_decode(int mode_val)
 	return 0;
 }
 
+// Reset decoder state for receiving new file
+void cimbard_reset_sink()
+{
+	_sink.reset();
+	_dec.reset();
+	_reassembled.clear();
+	_decId = 0;
+	std::cout << "Decoder sink reset" << std::endl;
+}
+
 // testing
 unsigned char* cimbard_get_reassembled_file_buff()
 {

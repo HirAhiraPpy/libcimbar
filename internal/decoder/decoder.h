@@ -19,6 +19,7 @@ int cimbard_get_filename(uint32_t id, char* filename, unsigned fnsize);
 int cimbard_get_decompress_bufsize();
 int cimbard_decompress_read(uint32_t id, unsigned char* buffer, unsigned size);
 int cimbard_configure_decode(int mode_val);
+void cimbard_reset_sink();
 
 #ifdef __cplusplus
 }

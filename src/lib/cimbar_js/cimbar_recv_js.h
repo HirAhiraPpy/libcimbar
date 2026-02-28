@@ -35,6 +35,9 @@ int cimbard_decompress_read(uint32_t id, unsigned char* buffer, unsigned size);
 
 int cimbard_configure_decode(int mode_val);
 
+// Reset decoder state for receiving new file
+void cimbard_reset_sink();
+
 // testing usage only!
 unsigned char* cimbard_get_reassembled_file_buff();
 

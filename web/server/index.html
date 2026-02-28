@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Cimbar Web Decoder</title>
+  <title>Cimbar Web 解码器</title>
   <style>
     * {
       margin: 0;
@@ -32,9 +32,28 @@
     }
 
     #video {
-      max-width: 100%;
-      max-height: 100%;
-      object-fit: contain;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    #crop-overlay {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      border: 2px solid rgba(0, 255, 0, 0.8);
+      box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
+      pointer-events: none;
+      z-index: 50;
+    }
+
+    #crop-overlay.scanning {
+      border-color: rgba(255, 255, 0, 0.8);
+    }
+
+    #crop-overlay.active {
+      border-color: rgba(0, 255, 255, 0.8);
     }
 
     #overlay {
@@ -51,22 +70,25 @@
     }
 
     #scan-frame {
-      width: 280px;
-      height: 280px;
+      width: min(512px, 85vw);
+      height: min(512px, 85vw);
       border: 3px solid #0f0;
       border-radius: 10px;
       box-shadow: 0 0 20px rgba(0, 255, 0, 0.5);
       position: relative;
+      background: transparent;
     }
 
     #scan-frame.scanning {
       border-color: #ff0;
       box-shadow: 0 0 20px rgba(255, 255, 0, 0.5);
+      background: rgba(255, 255, 0, 0.1);
     }
 
     #scan-frame.active {
       border-color: #0ff;
       box-shadow: 0 0 30px rgba(0, 255, 255, 0.7);
+      background: rgba(0, 255, 255, 0.1);
     }
 
     #scan-frame::before,
@@ -75,7 +97,7 @@
       position: absolute;
       width: 30px;
       height: 30px;
-      border-color: #0f0;
+      border-color: currentColor;
       border-style: solid;
     }
 
@@ -98,17 +120,34 @@
       bottom: 0;
       left: 0;
       right: 0;
-      background: rgba(0, 0, 0, 0.8);
+      background: rgba(0, 0, 0, 0.85);
       padding: 15px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 8px;
+      z-index: 100;
+    }
+
+    #status-bar #scan-btn {
+      align-self: center;
+      width: 80%;
+      max-width: 300px;
+      padding: 12px 20px;
+      font-size: 16px;
+      margin-bottom: 5px;
     }
 
     #status-text {
       text-align: center;
       font-size: 14px;
       color: #aaa;
+    }
+
+    #file-info {
+      text-align: center;
+      font-size: 12px;
+      color: #888;
+      min-height: 16px;
     }
 
     #progress-container {
@@ -133,11 +172,19 @@
 
     #controls {
       position: fixed;
-      top: 20px;
-      right: 20px;
+      top: 10px;
+      right: 10px;
       display: flex;
+      flex-direction: column;
       gap: 10px;
       z-index: 100;
+      max-width: 180px;
+    }
+
+    .control-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
     }
 
     .btn {
@@ -149,6 +196,8 @@
       cursor: pointer;
       font-size: 14px;
       backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      white-space: nowrap;
     }
 
     .btn:hover {
@@ -159,13 +208,41 @@
       background: rgba(255, 255, 255, 0.4);
     }
 
-    #mode-select {
+    .btn-primary {
+      background: rgba(0, 150, 255, 0.4);
+      border-color: rgba(0, 150, 255, 0.6);
+    }
+
+    .btn-primary:hover {
+      background: rgba(0, 150, 255, 0.5);
+    }
+
+    .btn-success {
+      background: rgba(0, 200, 100, 0.4);
+      border-color: rgba(0, 200, 100, 0.6);
+    }
+
+    .btn-success:hover {
+      background: rgba(0, 200, 100, 0.5);
+    }
+
+    .btn-danger {
+      background: rgba(200, 50, 50, 0.4);
+      border-color: rgba(200, 50, 50, 0.6);
+    }
+
+    .btn-danger:hover {
+      background: rgba(200, 50, 50, 0.5);
+    }
+
+    #mode-select, #resolution-select {
       background: rgba(0, 0, 0, 0.7);
       border: 1px solid #444;
       color: #fff;
       padding: 8px 12px;
       border-radius: 6px;
-      font-size: 14px;
+      font-size: 13px;
+      cursor: pointer;
     }
 
     #error-message {
@@ -173,13 +250,17 @@
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      background: rgba(255, 0, 0, 0.9);
+      background: rgba(200, 0, 0, 0.95);
       color: #fff;
       padding: 20px 30px;
       border-radius: 10px;
       text-align: center;
       display: none;
       z-index: 1000;
+      max-width: 90%;
+      white-space: pre-line;
+      font-size: 14px;
+      line-height: 1.6;
     }
 
     #file-complete {
@@ -187,7 +268,7 @@
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      background: rgba(0, 128, 0, 0.9);
+      background: rgba(0, 150, 0, 0.95);
       color: #fff;
       padding: 20px 30px;
       border-radius: 10px;
@@ -196,8 +277,323 @@
       z-index: 1000;
     }
 
+    #file-complete h2 {
+      margin-bottom: 10px;
+      font-size: 20px;
+    }
+
+    #file-complete p {
+      margin: 5px 0;
+    }
+
+    #connection-status {
+      position: fixed;
+      top: 55px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 8px 12px;
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.7);
+      font-size: 12px;
+      z-index: 90;
+    }
+
+    #connection-status.connected {
+      background: rgba(0, 100, 0, 0.7);
+    }
+
+    #connection-status.disconnected {
+      background: rgba(150, 50, 0, 0.7);
+    }
+
     .hidden {
       display: none !important;
+    }
+
+    /* Loading indicator */
+    .loading {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 3px solid rgba(255,255,255,.3);
+      border-radius: 50%;
+      border-top-color: #fff;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* 扫描状态指示器 */
+    #scan-indicator {
+      position: fixed;
+      bottom: 70px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 6px 16px;
+      border-radius: 20px;
+      background: rgba(0, 0, 0, 0.7);
+      font-size: 12px;
+      z-index: 90;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    #scan-indicator .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #666;
+    }
+
+    #scan-indicator.active .dot {
+      background: #0ff;
+      box-shadow: 0 0 10px #0ff;
+    }
+
+    #scan-indicator.scanning .dot {
+      background: #ff0;
+      box-shadow: 0 0 10px #ff0;
+    }
+
+    #scan-indicator.stopped .dot {
+      background: #f00;
+      box-shadow: 0 0 10px #f00;
+    }
+
+    /* 侧边栏样式 */
+    .sidebar {
+      position: fixed;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      width: 280px;
+      background: rgba(0, 0, 0, 0.95);
+      padding: 20px;
+      overflow-y: auto;
+      transform: translateX(100%);
+      transition: transform 0.3s ease;
+      z-index: 200;
+      box-shadow: -2px 0 10px rgba(0, 0, 0, 0.5);
+    }
+
+    .sidebar.open {
+      transform: translateX(0);
+    }
+
+    .sidebar h3 {
+      margin-bottom: 15px;
+      color: #0ff;
+      font-size: 16px;
+      border-bottom: 1px solid rgba(0, 255, 255, 0.3);
+      padding-bottom: 10px;
+    }
+
+    .completed-file-item {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .completed-file-item:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    .completed-file-item .filename {
+      font-size: 14px;
+      font-weight: bold;
+      color: #fff;
+      margin-bottom: 5px;
+      word-break: break-all;
+    }
+
+    .completed-file-item .meta {
+      font-size: 12px;
+      color: #aaa;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .sidebar-toggle {
+      position: fixed;
+      right: 10px;
+      bottom: 80px;
+      z-index: 150;
+      background: rgba(0, 150, 255, 0.4);
+      border: 1px solid rgba(0, 150, 255, 0.6);
+      color: #fff;
+      padding: 10px 15px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+
+    .sidebar-toggle:hover {
+      background: rgba(0, 150, 255, 0.5);
+    }
+
+    .file-actions {
+      margin-top: 8px;
+      display: flex;
+      gap: 8px;
+    }
+
+    .file-actions button {
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+      background: rgba(0, 200, 100, 0.4);
+      color: #fff;
+    }
+
+    .file-actions button:hover {
+      background: rgba(0, 200, 100, 0.6);
+    }
+
+    #empty-files-msg {
+      color: #888;
+      font-size: 13px;
+      text-align: center;
+      padding: 20px;
+    }
+
+    /* 顶部控制栏 */
+    #top-controls {
+      position: fixed;
+      top: 10px;
+      left: 0;
+      right: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 10px;
+      z-index: 150;
+      pointer-events: none;
+    }
+
+    #top-controls > * {
+      pointer-events: auto;
+    }
+
+    /* 设置按钮 */
+    .settings-toggle {
+      background: rgba(0, 150, 255, 0.4);
+      border: 1px solid rgba(0, 150, 255, 0.6);
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+
+    .settings-toggle:hover {
+      background: rgba(0, 150, 255, 0.5);
+    }
+
+    /* 左侧设置边栏 */
+    .settings-sidebar {
+      position: fixed;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 200px;
+      background: rgba(0, 0, 0, 0.95);
+      padding: 20px;
+      overflow-y: auto;
+      transform: translateX(-100%);
+      transition: transform 0.3s ease;
+      z-index: 200;
+      box-shadow: 2px 0 10px rgba(0, 0, 0, 0.5);
+    }
+
+    .settings-sidebar.open {
+      transform: translateX(0);
+    }
+
+    .settings-sidebar h3 {
+      margin-bottom: 20px;
+      color: #0ff;
+      font-size: 16px;
+      border-bottom: 1px solid rgba(0, 255, 255, 0.3);
+      padding-bottom: 10px;
+    }
+
+    .settings-sidebar .setting-row {
+      margin-bottom: 15px;
+    }
+
+    .settings-sidebar label {
+      display: block;
+      margin-bottom: 5px;
+      color: #aaa;
+      font-size: 13px;
+    }
+
+    .settings-sidebar select {
+      width: 100%;
+      background: rgba(0, 0, 0, 0.7);
+      border: 1px solid #444;
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    /* 边栏关闭按钮 */
+    .sidebar-close {
+      position: absolute;
+      top: 15px;
+      right: 15px;
+      background: transparent;
+      border: none;
+      color: #fff;
+      font-size: 24px;
+      cursor: pointer;
+      padding: 0;
+      width: 30px;
+      height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+    }
+
+    .sidebar-close:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .sidebar-header {
+      position: relative;
+      margin-bottom: 20px;
+    }
+
+    .sidebar-header h3 {
+      margin: 0;
+      color: #0ff;
+      font-size: 16px;
+      border-bottom: 1px solid rgba(0, 255, 255, 0.3);
+      padding-bottom: 10px;
+    }
+
+    /* 移除原有的 controls 和 sidebar-toggle 样式 */
+    #controls {
+      display: none;
+    }
+
+    .sidebar-toggle {
+      display: none;
     }
   </style>
 </head>
@@ -206,28 +602,75 @@
     <video id="video" autoplay playsinline muted></video>
   </div>
 
+  <div id="crop-overlay"></div>
+
   <div id="overlay">
     <div id="scan-frame"></div>
   </div>
 
-  <div id="controls">
-    <select id="mode-select" class="btn">
-      <option value="Auto">Auto</option>
-      <option value="B">Mode B</option>
-      <option value="Bu">Mode Bu</option>
-      <option value="Bm">Mode Bm</option>
-      <option value="4C">Mode 4C</option>
-    </select>
+  <div id="connection-status" class="disconnected">连接中...</div>
+
+  <div id="scan-indicator">
+    <span class="dot"></span>
+    <span id="scan-indicator-text">已停止</span>
+  </div>
+
+  <div id="top-controls">
+    <button id="settings-toggle" class="settings-toggle">≡ 设置</button>
+    <button id="files-toggle" class="settings-toggle">📁 已完成</button>
+  </div>
+
+
+  <!-- 左侧设置边栏 -->
+  <div id="settings-sidebar" class="settings-sidebar">
+    <div class="sidebar-header">
+      <h3>设置</h3>
+      <button id="settings-close" class="sidebar-close">×</button>
+    </div>
+    <div class="settings-content">
+      <div class="setting-row">
+        <label>分辨率</label>
+        <select id="resolution-select">
+          <option value="640x480">640x480</option>
+          <option value="1280x720" selected>1280x720</option>
+          <option value="1920x1080">1920x1080</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label>模式</label>
+        <select id="mode-select">
+          <option value="Auto">自动</option>
+          <option value="B">模式 B</option>
+          <option value="Bu">模式 Bu</option>
+          <option value="Bm">模式 Bm</option>
+          <option value="4C">模式 4C</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右侧已完成文件边栏 -->
+  <div id="sidebar" class="sidebar">
+    <div class="sidebar-header">
+      <h3>已完成文件</h3>
+      <button id="sidebar-close" class="sidebar-close">×</button>
+    </div>
+    <div id="completed-files-list">
+      <div id="empty-files-msg">暂无已完成文件</div>
+    </div>
   </div>
 
   <div id="status-bar">
-    <div id="status-text">Connecting...</div>
+    <button id="scan-btn" class="btn btn-primary">开始识别</button>
+    <div id="status-text">正在初始化...</div>
     <div id="progress-container"></div>
+    <div id="file-info"></div>
   </div>
 
   <div id="error-message"></div>
+
   <div id="file-complete">
-    <h2>File Received!</h2>
+    <h2>文件接收完成!</h2>
     <p id="complete-filename"></p>
     <p id="complete-size"></p>
   </div>

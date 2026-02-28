@@ -168,7 +168,7 @@ brew install opencv glfw cmake
 
 ## 性能指标
 
-- 帧率：~15-30 fps（限速以减少带宽）
+- 帧率：~10-15 fps（限速以减少带宽）
 - 解码延迟：~50-100ms/帧
 - 吞吐量：取决于 Cimbar 模式和网络
 
@@ -176,8 +176,32 @@ brew install opencv glfw cmake
 
 ### 摄像头无法访问
 
-- 确保使用 HTTPS 或 localhost（浏览器安全要求）
-- 检查摄像头权限
+**问题**: 页面显示黑色屏幕，无法访问摄像头
+
+**原因**: 现代浏览器（Chrome/Safari）在非 HTTPS 环境下会限制摄像头访问
+
+**解决方案**:
+
+1. **使用 localhost** (推荐用于测试)
+   - localhost 被视为安全上下文，允许摄像头访问
+
+2. **配置 HTTPS** (推荐用于生产)
+   - 使用反向代理（如 nginx）配置 SSL 证书
+   - 或使用 Caddy 等自动 HTTPS 服务器
+
+3. **Chrome 临时方案** (仅用于开发)
+   - 访问 `chrome://flags/#unsafely-treat-insecure-origin-as-secure`
+   - 启用该标志并添加你的服务器地址
+
+4. **Safari iOS**
+   - iOS Safari 对非 HTTPS 页面的摄像头限制更严格
+   - 必须使用 HTTPS 或 localhost
+
+### 摄像头权限被拒绝
+
+- 检查浏览器权限设置
+- 确保没有其他程序占用摄像头
+- 刷新页面重新请求权限
 
 ### 解码失败
 
@@ -186,10 +210,24 @@ brew install opencv glfw cmake
 - 填满扫描框引导线
 - 尝试不同模式
 
-### CGO 构建错误
+### Ctrl+C 无法终止服务器
 
-- 验证 OpenCV 安装：`pkg-config --modversion opencv4`
-- 检查 `internal/decoder/decoder.go` 中的库路径
+- 已修复：现在按 Ctrl+C 会优雅关闭服务器
+- 服务器会关闭所有 WebSocket 连接后退出
+
+## 改进历史
+
+### v2.0 改进
+
+1. **优雅关闭**: 支持 Ctrl+C 终止，自动关闭 WebSocket 连接
+2. **摄像头兼容性**:
+   - 移除 `requestVideoFrameCallback` 依赖（需要 HTTPS）
+   - 使用 `setInterval` 实现帧捕获（更兼容）
+3. **HTTPS 提示**: 非 HTTPS 环境显示警告信息
+4. **视频显示**:
+   - 添加 `object-fit: cover` 确保视频填满容器
+   - 添加加载指示器
+5. **错误处理**: 更详细的错误消息和故障排除提示
 
 ## 许可证
 

@@ -2,6 +2,8 @@
 #ifndef CIMBAR_JS_API_H
 #define CIMBAR_JS_API_H
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -9,7 +11,8 @@ extern "C" {
 int cimbare_init_window(int width, int height);
 int cimbare_rotate_window(bool rotate);
 int cimbare_render();
-int cimbare_next_frame(bool color_balance=false);
+int cimbare_next_frame(bool color_balance);
+int cimbare_next_frame_default(); // Helper for CGO - calls next_frame(false)
 int cimbare_init_encode(const char* filename, unsigned fnsize, int encode_id);
 int cimbare_encode_bufsize();
 int cimbare_encode(const unsigned char* buffer, unsigned size);

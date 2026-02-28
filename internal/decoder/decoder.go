@@ -41,8 +41,11 @@ type DecoderResult struct {
 
 // FountainResult represents the result of fountain decode
 type FountainResult struct {
-	FileID   uint32 // File ID (if complete, >0)
-	Progress []int  // Progress percentages for each file
+	FileID     uint32    // File ID (if complete, >0)
+	FileSize   uint32    // Total file size in bytes (from fountain metadata)
+	BytesRecv  uint32    // Bytes received so far
+	Progress   []float64 // Progress as decimal (0.0-1.0) for each file
+	IsDuplicate bool     // Whether this is a duplicate frame (file already decoded)
 }
 
 // Decoder handles cimbar decoding
@@ -146,7 +149,33 @@ func (d *Decoder) FountainDecode(data []byte) (*FountainResult, error) {
 	dataPtr := (*C.uchar)(unsafe.Pointer(&data[0]))
 	result := C.cimbard_fountain_decode(dataPtr, C.uint(len(data)))
 
+	// Parse fountain metadata from data
+	// First 6 bytes: [encode_id:1][file_size:3][block_id:2]
+	var fileSize uint32 = 0
+	var bytesRecv uint32 = 0
+	if len(data) >= 6 {
+		// Parse file size from bytes 1-3 (big endian with high bit in byte 0)
+		fileSize = uint32(data[3]) | (uint32(data[2]) << 8) | (uint32(data[1]) << 16) | ((uint32(data[0]) & 0x80) << 17)
+		// Block ID from bytes 4-5
+		blockID := uint16(data[5]) | (uint16(data[4]) << 8)
+		// Approximate bytes received = block_id * chunk_size (744 bytes per block)
+		bytesRecv = uint32(blockID+1) * 744
+		if bytesRecv > fileSize {
+			bytesRecv = fileSize
+		}
+	}
+
+	// Check for special return values
 	if result < 0 {
+		if result == -1 {
+			// File already decoded (duplicate frame) - not an error
+			return &FountainResult{
+				IsDuplicate: true,
+				FileSize:    fileSize,
+				BytesRecv:   bytesRecv,
+				Progress:    d.getProgress(),
+			}, nil
+		}
 		return nil, fmt.Errorf("fountain decode error: %d", result)
 	}
 
@@ -154,14 +183,18 @@ func (d *Decoder) FountainDecode(data []byte) (*FountainResult, error) {
 		// File complete! result is the file ID
 		fileID := uint32(result & 0xFFFFFFFF)
 		return &FountainResult{
-			FileID:   fileID,
-			Progress: d.getProgress(),
+			FileID:    fileID,
+			FileSize:  fileSize,
+			BytesRecv: bytesRecv,
+			Progress:  d.getProgress(),
 		}, nil
 	}
 
 	return &FountainResult{
-		FileID:   0,
-		Progress: d.getProgress(),
+		FileID:    0,
+		FileSize:  fileSize,
+		BytesRecv: bytesRecv,
+		Progress:  d.getProgress(),
 	}, nil
 }
 
@@ -186,14 +219,19 @@ func GetFilename(fileID uint32) (string, error) {
 }
 
 // DecompressRead reads decompressed data for a file
+// Returns empty slice with nil error when read is complete
 func DecompressRead(fileID uint32) ([]byte, error) {
 	bufSize := int(C.cimbard_get_decompress_bufsize())
 	buf := make([]byte, bufSize)
 	bufPtr := (*C.uchar)(unsafe.Pointer(&buf[0]))
 
 	result := C.cimbard_decompress_read(C.uint(fileID), bufPtr, C.uint(bufSize))
-	if result <= 0 {
+	if result < 0 {
 		return nil, fmt.Errorf("decompress read error: %d", result)
+	}
+	if result == 0 {
+		// Read complete, no more data
+		return []byte{}, nil
 	}
 
 	return buf[:result], nil
@@ -205,33 +243,52 @@ func GetFileSize(fileID uint32) uint32 {
 }
 
 // getProgress retrieves decode progress
-func (d *Decoder) getProgress() []int {
+func (d *Decoder) getProgress() []float64 {
 	bufSize := 1024
 	buf := make([]byte, bufSize)
 	bufPtr := (*C.uchar)(unsafe.Pointer(&buf[0]))
 
 	result := C.cimbard_get_report(bufPtr, C.uint(bufSize))
 	if result == 0 {
-		return []int{}
+		return []float64{}
 	}
 
 	// Parse JSON-like progress string
-	// Format is typically something like: [25,50,75,100]
+	// Format is typically something like: [25,50,75,100] or [0.25,0.5,0.75,1.0]
 	progressStr := string(buf[:result])
-	progress := make([]int, 0)
+	progress := make([]float64, 0)
 
 	// Simple parser for [num,num,num] format
-	var num int
-	inNum := false
+	var num float64
+	var decimal float64
+	var inNum bool
+	var inDecimal bool
+	place := 1.0
+
 	for _, ch := range progressStr {
 		if ch >= '0' && ch <= '9' {
-			num = num*10 + int(ch-'0')
-			inNum = true
+			if !inNum {
+				inNum = true
+				num = 0
+				decimal = 0
+				inDecimal = false
+				place = 0.1
+			}
+			if inDecimal {
+				decimal += float64(ch-'0') * place
+				place *= 0.1
+			} else {
+				num = num*10 + float64(ch-'0')
+			}
+		} else if ch == '.' {
+			inDecimal = true
 		} else if ch == ',' || ch == ']' {
 			if inNum {
-				progress = append(progress, num)
+				progress = append(progress, num+decimal)
 				num = 0
+				decimal = 0
 				inNum = false
+				inDecimal = false
 			}
 		}
 	}
@@ -262,4 +319,9 @@ func Configure(mode string) {
 		modeVal = 4
 	}
 	C.cimbard_configure_decode(C.int(modeVal))
+}
+
+// Reset resets the decoder state for receiving a new file
+func Reset() {
+	C.cimbard_reset_sink()
 }

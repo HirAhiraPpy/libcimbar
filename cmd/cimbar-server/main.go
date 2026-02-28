@@ -2,12 +2,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/HirAhiraPpy/libcimbar/go/internal/server"
 )
@@ -35,23 +37,52 @@ func main() {
 
 	// Setup HTTP handlers
 	fs := http.Dir(*webDir)
-	http.Handle("/", srv.StaticHandler(fs))
-	http.HandleFunc("/ws", srv.WSHandler)
+	mux := http.NewServeMux()
+	mux.Handle("/", srv.StaticHandler(fs))
+	mux.HandleFunc("/ws", srv.WSHandler)
+	mux.HandleFunc("/api/files", srv.FilesHandler)
+	mux.HandleFunc("/api/download", srv.DownloadHandler)
 
-	// Handle graceful shutdown
+	// Create HTTP server with timeouts
+	httpServer := &http.Server{
+		Addr:         *addr,
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	// Channel to listen for interrupt signals
+	shutdown := make(chan os.Signal, 1)
+	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
+
+	// Start server in a goroutine
 	go func() {
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		<-sigChan
-		log.Println("Shutting down...")
+		log.Printf("Starting cimbar web server on %s", *addr)
+		log.Printf("Web UI: http://%s", *addr)
+		log.Printf("Output directory: %s", *outputDir)
+		log.Printf("Press Ctrl+C to stop")
+
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed: %v", err)
+		}
 	}()
 
-	// Start server
-	log.Printf("Starting cimbar web server on %s", *addr)
-	log.Printf("Web UI: http://localhost%s", *addr)
-	log.Printf("Output directory: %s", *outputDir)
+	// Wait for interrupt signal
+	<-shutdown
+	log.Println("\nReceived shutdown signal, stopping server...")
 
-	if err := http.ListenAndServe(*addr, nil); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	// Close server (closes WebSocket connections)
+	srv.Close()
+
+	// Create a deadline for the shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Attempt graceful shutdown
+	if err := httpServer.Shutdown(ctx); err != nil {
+		log.Printf("Graceful shutdown error: %v", err)
 	}
+
+	log.Println("Server stopped")
 }

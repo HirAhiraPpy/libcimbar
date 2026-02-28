@@ -133,7 +133,7 @@ int main(int argc, char** argv)
 				if (cimbare_render() < 0)
 					return 0;
 			}
-			while (++frameCount == cimbare_next_frame()); // when next_frame() finally loops, we roll to the next file
+			while (++frameCount == cimbare_next_frame(false)); // when next_frame() finally loops, we roll to the next file
 		}
 
 	return 0; // should never reach here

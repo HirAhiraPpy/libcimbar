@@ -3,41 +3,57 @@ package server
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/HirAhiraPpy/libcimbar/go/internal/decoder"
 
 	"github.com/gorilla/websocket"
 )
 
+// CompletedFile represents a completed file download
+type CompletedFile struct {
+	Filename    string    `json:"filename"`
+	FileSize    uint32    `json:"file_size"`
+	Path        string    `json:"path"`
+	CompletedAt time.Time `json:"completed_at"`
+}
+
 // DecodeResponse represents the response sent back to the client after decoding
 type DecodeResponse struct {
-	Type      string `json:"type"`
-	Success   bool   `json:"success,omitempty"`
-	Error     string `json:"error,omitempty"`
-	Filename  string `json:"filename,omitempty"`
-	FileSize  uint32 `json:"file_size,omitempty"`
-	Progress  []int  `json:"progress,omitempty"`
-	Bytes     int    `json:"bytes,omitempty"`
-	Extracted bool   `json:"extracted,omitempty"`
-	Failed    bool   `json:"failed,omitempty"`
-	NoData    bool   `json:"nodata,omitempty"`
+	Type         string    `json:"type"`
+	Success      bool      `json:"success,omitempty"`
+	Error        string    `json:"error,omitempty"`
+	Filename     string    `json:"filename,omitempty"`
+	FileSize     uint32    `json:"file_size,omitempty"`
+	BytesRecv    uint32    `json:"bytes_recv,omitempty"`
+	BytesDecoded uint32    `json:"bytes_decoded,omitempty"`
+	Progress     []float64 `json:"progress,omitempty"`
+	Bytes        int       `json:"bytes,omitempty"`
+	Extracted    bool      `json:"extracted,omitempty"`
+	Failed       bool      `json:"failed,omitempty"`
+	NoData       bool      `json:"nodata,omitempty"`
+	IsDuplicate  bool      `json:"is_duplicate,omitempty"`
 }
 
 // Server represents the cimbar web server
 type Server struct {
-	outputDir string
-	mode      string
-	workers   int
-	upgrader  websocket.Upgrader
-	decoders  []*decoder.Decoder
-	nextDec   int
-	mu        sync.Mutex
+	outputDir      string
+	mode           string
+	workers        int
+	upgrader       websocket.Upgrader
+	decoders       []*decoder.Decoder
+	nextDec        int
+	mu             sync.Mutex
+	closeCh        chan struct{}
+	wg             sync.WaitGroup
+	completedFiles []CompletedFile
 }
 
 // NewServer creates a new server instance
@@ -60,6 +76,7 @@ func NewServer(outputDir, mode string, workers int) (*Server, error) {
 		},
 		decoders: make([]*decoder.Decoder, workers),
 		nextDec:  0,
+		closeCh:  make(chan struct{}),
 	}
 
 	// Initialize decoders
@@ -71,6 +88,14 @@ func NewServer(outputDir, mode string, workers int) (*Server, error) {
 	return s, nil
 }
 
+// Close gracefully shuts down the server
+func (s *Server) Close() {
+	log.Println("Closing server...")
+	close(s.closeCh)
+	s.wg.Wait()
+	log.Println("Server closed")
+}
+
 // StaticHandler serves static files from the web/server directory
 func (s *Server) StaticHandler(fs http.FileSystem) http.Handler {
 	return http.FileServer(fs)
@@ -78,6 +103,10 @@ func (s *Server) StaticHandler(fs http.FileSystem) http.Handler {
 
 // WSHandler handles WebSocket connections for video frame decoding
 func (s *Server) WSHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("WebSocket request received from %s", r.RemoteAddr)
+	log.Printf("Upgrade header: %s", r.Header.Get("Upgrade"))
+	log.Printf("Connection header: %s", r.Header.Get("Connection"))
+
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("WebSocket upgrade error: %v", err)
@@ -85,7 +114,7 @@ func (s *Server) WSHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	log.Printf("Client connected: %s", conn.RemoteAddr())
+	log.Printf("✓ Client connected: %s", conn.RemoteAddr())
 
 	// Get a decoder for this connection
 	s.mu.Lock()
@@ -93,11 +122,32 @@ func (s *Server) WSHandler(w http.ResponseWriter, r *http.Request) {
 	s.nextDec = (s.nextDec + 1) % len(s.decoders)
 	s.mu.Unlock()
 
+	s.wg.Add(1)
+	defer s.wg.Done()
+
 	// Track decode state
 	var currentFileID uint32 = 0
+	var frameCounter int = 0
+	var logTicker = time.NewTicker(time.Second * 10)
+	defer logTicker.Stop()
 
+	// Read loop
 	for {
-		// Read binary message
+		// Check if server is shutting down
+		select {
+		case <-s.closeCh:
+			log.Println("Server shutting down, closing WebSocket connection")
+			return
+		case <-logTicker.C:
+			log.Printf("Frame stats: received=%d, current_file_id=%d", frameCounter, currentFileID)
+		default:
+		}
+
+		// Set read deadline to 120 seconds - allows for idle connections
+		// while still timing out on truly dead connections
+		conn.SetReadDeadline(time.Now().Add(time.Second * 120))
+
+		// Read message
 		msgType, data, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -106,10 +156,37 @@ func (s *Server) WSHandler(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		// Handle ping/message from client (keep-alive or control commands)
+		if msgType == websocket.TextMessage {
+			// Try to parse as JSON to check for control messages
+			if len(data) > 0 && string(data[:1]) == "{" {
+				var ctrlMsg struct {
+					Type string `json:"type"`
+				}
+				if err := json.Unmarshal(data, &ctrlMsg); err == nil {
+					switch ctrlMsg.Type {
+					case "ping":
+						// Ignore ping, just keep connection alive
+						continue
+					case "reset_decoder":
+						// Client requests decoder reset for new file
+						log.Println("Resetting decoder state for new file")
+						currentFileID = 0
+						decoder.Reset()
+						continue
+					}
+				}
+			}
+			// Not a recognized message, skip
+			continue
+		}
+
 		if msgType != websocket.BinaryMessage {
 			// Skip non-binary messages
 			continue
 		}
+
+		frameCounter++
 
 		// Parse frame header: [format:1][mode:1][width:2][height:2][data:...]
 		if len(data) < 6 {
@@ -147,8 +224,15 @@ func (s *Server) WSHandler(w http.ResponseWriter, r *http.Request) {
 		// Step 1: Scan, extract and decode
 		result, extractedData, err := dec.ScanExtractDecode(pixelData, width, height, format)
 		if err != nil {
+			log.Printf("Decode error: %v", err)
 			s.sendResponse(conn, DecodeResponse{Type: "error", Error: err.Error()})
 			continue
+		}
+
+		// 每 10 帧记录一次解码日志
+		if frameCounter%10 == 0 {
+			log.Printf("Frame %d: %dx%d, result=%d bytes, extracted=%v, failed=%v",
+				frameCounter, width, height, result.Bytes, result.Extracted, result.Failed)
 		}
 
 		if result.Failed {
@@ -185,15 +269,33 @@ func (s *Server) WSHandler(w http.ResponseWriter, r *http.Request) {
 				// New file completed
 				currentFileID = newFileID
 				s.handleFileComplete(conn, newFileID)
+				// Don't send decode response, file is complete
 			}
+			// Same file, skip (already complete) - client can continue scanning
+			continue
+		}
+
+		// Handle duplicate frame (file already decoded)
+		if fountainResult.IsDuplicate {
+			s.sendResponse(conn, DecodeResponse{
+				Type:        "decode",
+				IsDuplicate: true,
+				FileSize:    fountainResult.FileSize,
+				BytesRecv:   fountainResult.BytesRecv,
+				Progress:    fountainResult.Progress,
+			})
+			continue
 		}
 
 		// Send decode response with progress
 		s.sendResponse(conn, DecodeResponse{
-			Type:      "decode",
-			Bytes:     result.Bytes,
-			Extracted: true,
-			Progress:  fountainResult.Progress,
+			Type:         "decode",
+			Bytes:        result.Bytes,
+			Extracted:    true,
+			FileSize:     fountainResult.FileSize,
+			BytesRecv:    fountainResult.BytesRecv,
+			BytesDecoded: fountainResult.BytesRecv,
+			Progress:     fountainResult.Progress,
 		})
 	}
 
@@ -202,45 +304,69 @@ func (s *Server) WSHandler(w http.ResponseWriter, r *http.Request) {
 
 // handleFileComplete handles a completed file decode
 func (s *Server) handleFileComplete(conn *websocket.Conn, fileID uint32) {
+	log.Printf("=== File complete! FileID: %d ===", fileID)
+
 	filename, err := decoder.GetFilename(fileID)
 	if err != nil {
+		log.Printf("GetFilename error: %v", err)
 		s.sendResponse(conn, DecodeResponse{Type: "error", Error: fmt.Sprintf("get filename: %v", err)})
 		return
 	}
 
 	if filename == "" {
 		filename = fmt.Sprintf("cimbar_file_%d", fileID)
+		log.Printf("No filename in data, using: %s", filename)
+	} else {
+		log.Printf("Filename from data: %s", filename)
 	}
 
 	fileSize := decoder.GetFileSize(fileID)
+	log.Printf("File size: %d bytes", fileSize)
 
 	// Read decompressed data
 	var allData []byte
+	chunkCount := 0
 	for {
 		chunk, err := decoder.DecompressRead(fileID)
 		if err != nil {
-			log.Printf("DecompressRead error: %v", err)
+			log.Printf("DecompressRead error (chunk %d): %v", chunkCount, err)
 			break
 		}
 		if len(chunk) == 0 {
+			log.Printf("DecompressRead complete after %d chunks, total %d bytes", chunkCount, len(allData))
 			break
 		}
 		allData = append(allData, chunk...)
+		chunkCount++
+		log.Printf("DecompressRead chunk %d: %d bytes (total: %d)", chunkCount, len(chunk), len(allData))
 	}
 
 	if len(allData) == 0 {
+		log.Printf("ERROR: No data to write for fileID %d", fileID)
 		s.sendResponse(conn, DecodeResponse{Type: "error", Error: "no data to write"})
 		return
 	}
 
 	// Write to output directory
 	outputPath := filepath.Join(s.outputDir, filename)
+	log.Printf("Writing file to: %s", outputPath)
 	if err := os.WriteFile(outputPath, allData, 0644); err != nil {
+		log.Printf("WriteFile error: %v", err)
 		s.sendResponse(conn, DecodeResponse{Type: "error", Error: fmt.Sprintf("write file: %v", err)})
 		return
 	}
 
-	log.Printf("File saved: %s (%d bytes)", outputPath, len(allData))
+	log.Printf("=== File saved successfully: %s (%d bytes) ===", outputPath, len(allData))
+
+	// Add to completed files list
+	s.mu.Lock()
+	s.completedFiles = append(s.completedFiles, CompletedFile{
+		Filename:    filename,
+		FileSize:    fileSize,
+		Path:        outputPath,
+		CompletedAt: time.Now(),
+	})
+	s.mu.Unlock()
 
 	// Notify client
 	s.sendResponse(conn, DecodeResponse{
@@ -254,4 +380,47 @@ func (s *Server) handleFileComplete(conn *websocket.Conn, fileID uint32) {
 // sendResponse sends a JSON response to the client
 func (s *Server) sendResponse(conn *websocket.Conn, resp DecodeResponse) {
 	conn.WriteJSON(resp)
+}
+
+// FilesHandler returns the list of completed files
+func (s *Server) FilesHandler(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	files := s.completedFiles
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(files)
+}
+
+// DownloadHandler serves completed files for download
+func (s *Server) DownloadHandler(w http.ResponseWriter, r *http.Request) {
+	filename := r.URL.Query().Get("file")
+	if filename == "" {
+		http.Error(w, "file parameter required", http.StatusBadRequest)
+		return
+	}
+
+	// Security: clean filename to prevent directory traversal
+	cleanFilename := filepath.Base(filename)
+	if cleanFilename != filename {
+		http.Error(w, "invalid filename", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	var filePath string
+	for _, f := range s.completedFiles {
+		if f.Filename == cleanFilename {
+			filePath = f.Path
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	if filePath == "" {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+
+	http.ServeFile(w, r, filePath)
 }
